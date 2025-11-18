@@ -1,0 +1,27 @@
+[Unit]
+Description=DICOM Viewer Web Application
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+
+# Remove old container if exists
+ExecStartPre=-/usr/bin/docker stop dicom-viewer
+ExecStartPre=-/usr/bin/docker rm dicom-viewer
+
+# Start container
+ExecStart=/usr/bin/docker run --rm \
+    --name dicom-viewer \
+    -p 127.0.0.1:8000:8000 \
+    -v /opt/dicom-viewer/uploads:/app/uploads \
+    dicom-viewer:latest
+
+# Stop container
+ExecStop=/usr/bin/docker stop dicom-viewer
+
+[Install]
+WantedBy=multi-user.target
