@@ -12,22 +12,20 @@ import json
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['DATASETS_FOLDER'] = 'datasets'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
-# Ensure upload folder exists
+# Ensure folders exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['DATASETS_FOLDER'], exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() == 'zip'
 
-def extract_dicom_from_zip(zip_path, extract_to):
-    """Extract zip file and return list of DICOM files"""
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_to)
-    
-    # Find all DICOM files
+def find_dicom_files(directory):
+    """Find all DICOM files in a directory"""
     dicom_files = []
-    for root, dirs, files in os.walk(extract_to):
+    for root, dirs, files in os.walk(directory):
         for file in files:
             filepath = os.path.join(root, file)
             # Try to read as DICOM
@@ -38,6 +36,13 @@ def extract_dicom_from_zip(zip_path, extract_to):
                 continue
     
     return sorted(dicom_files)
+
+def extract_dicom_from_zip(zip_path, extract_to):
+    """Extract zip file and return list of DICOM files"""
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+    
+    return find_dicom_files(extract_to)
 
 def load_dicom_slices(dicom_files):
     """Load DICOM slices and sort them"""
@@ -275,6 +280,178 @@ def get_multiplanar_views(session_id):
     
     except Exception as e:
         return jsonify({'error': f'Error generating views: {str(e)}'}), 500
+
+@app.route('/datasets')
+def list_datasets():
+    """List all available datasets (collections)"""
+    try:
+        datasets = []
+        datasets_path = app.config['DATASETS_FOLDER']
+        
+        if not os.path.exists(datasets_path):
+            return jsonify({'datasets': []})
+        
+        # List all directories in datasets folder (each is a collection)
+        for entry in os.listdir(datasets_path):
+            entry_path = os.path.join(datasets_path, entry)
+            if os.path.isdir(entry_path):
+                # Count patient folders (subdirectories with DICOM files)
+                patient_count = 0
+                total_dicom_files = 0
+                
+                for patient_folder in os.listdir(entry_path):
+                    patient_path = os.path.join(entry_path, patient_folder)
+                    if os.path.isdir(patient_path):
+                        dicom_files = find_dicom_files(patient_path)
+                        if dicom_files:
+                            patient_count += 1
+                            total_dicom_files += len(dicom_files)
+                
+                if patient_count > 0:
+                    datasets.append({
+                        'id': entry,
+                        'name': entry,
+                        'num_patients': patient_count,
+                        'num_files': total_dicom_files
+                    })
+        
+        datasets.sort(key=lambda x: x.get('name', ''))
+        return jsonify({'datasets': datasets})
+    
+    except Exception as e:
+        return jsonify({'error': f'Error listing datasets: {str(e)}'}), 500
+
+@app.route('/datasets/<dataset_id>/patients')
+def list_patients(dataset_id):
+    """List all patients within a dataset"""
+    try:
+        dataset_path = os.path.join(app.config['DATASETS_FOLDER'], dataset_id)
+        
+        if not os.path.exists(dataset_path):
+            return jsonify({'error': f'Dataset not found: {dataset_id}'}), 404
+        
+        patients = []
+        
+        # List all patient folders
+        for patient_folder in os.listdir(dataset_path):
+            patient_path = os.path.join(dataset_path, patient_folder)
+            if os.path.isdir(patient_path):
+                dicom_files = find_dicom_files(patient_path)
+                
+                if dicom_files:
+                    # Get info from first DICOM file
+                    try:
+                        first_ds = pydicom.dcmread(dicom_files[0], stop_before_pixels=True)
+                        patient_info = {
+                            'id': patient_folder,
+                            'name': patient_folder,
+                            'num_files': len(dicom_files),
+                            'patient_name': str(first_ds.PatientName) if hasattr(first_ds, 'PatientName') else 'Unknown',
+                            'patient_id': str(first_ds.PatientID) if hasattr(first_ds, 'PatientID') else 'Unknown',
+                            'study_date': str(first_ds.StudyDate) if hasattr(first_ds, 'StudyDate') else 'Unknown',
+                            'modality': str(first_ds.Modality) if hasattr(first_ds, 'Modality') else 'Unknown',
+                        }
+                        patients.append(patient_info)
+                    except Exception as e:
+                        # If can't read DICOM metadata, just list basic info
+                        patients.append({
+                            'id': patient_folder,
+                            'name': patient_folder,
+                            'num_files': len(dicom_files)
+                        })
+        
+        patients.sort(key=lambda x: x.get('name', ''))
+        return jsonify({'patients': patients})
+    
+    except Exception as e:
+        return jsonify({'error': f'Error listing patients: {str(e)}'}), 500
+
+@app.route('/datasets/<dataset_id>/patients/<patient_id>/load', methods=['POST'])
+def load_patient(dataset_id, patient_id):
+    """Load a specific patient scan from a dataset"""
+    try:
+        patient_path = os.path.join(app.config['DATASETS_FOLDER'], dataset_id, patient_id)
+        
+        if not os.path.exists(patient_path):
+            return jsonify({'error': f'Patient not found: {dataset_id}/{patient_id}'}), 404
+        
+        if not os.path.isdir(patient_path):
+            return jsonify({'error': f'Patient path is not a directory: {patient_id}'}), 400
+        
+        # Find all DICOM files for this patient
+        dicom_files = find_dicom_files(patient_path)
+        
+        if not dicom_files:
+            return jsonify({'error': 'No DICOM files found in dataset'}), 400
+        
+        # Load DICOM slices
+        slices = load_dicom_slices(dicom_files)
+        
+        if not slices:
+            return jsonify({'error': 'Could not load any valid DICOM images'}), 400
+        
+        # Create session in uploads folder (reuse existing session structure)
+        import uuid
+        session_id = f"dataset_{dataset_id}_{patient_id}_{str(uuid.uuid4())[:8]}"
+        session_path = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
+        os.makedirs(session_path, exist_ok=True)
+        
+        # Get metadata from first slice
+        first_slice = slices[0]
+        metadata = {
+            'patient_name': str(first_slice.PatientName) if hasattr(first_slice, 'PatientName') else 'Unknown',
+            'patient_id': str(first_slice.PatientID) if hasattr(first_slice, 'PatientID') else 'Unknown',
+            'study_date': str(first_slice.StudyDate) if hasattr(first_slice, 'StudyDate') else 'Unknown',
+            'modality': str(first_slice.Modality) if hasattr(first_slice, 'Modality') else 'Unknown',
+            'num_slices': len(slices),
+            'rows': int(first_slice.Rows),
+            'columns': int(first_slice.Columns),
+            'dataset_id': dataset_id,
+            'patient_folder': patient_id,
+        }
+        
+        # Get window center/width if available
+        window_center = None
+        window_width = None
+        if hasattr(first_slice, 'WindowCenter') and hasattr(first_slice, 'WindowWidth'):
+            wc = first_slice.WindowCenter
+            ww = first_slice.WindowWidth
+            if isinstance(wc, pydicom.multival.MultiValue):
+                wc = wc[0]
+            if isinstance(ww, pydicom.multival.MultiValue):
+                ww = ww[0]
+            window_center = float(wc)
+            window_width = float(ww)
+            metadata['window_center'] = window_center
+            metadata['window_width'] = window_width
+        
+        # Save session data
+        session_data = {
+            'session_id': session_id,
+            'metadata': metadata,
+            'num_slices': len(slices),
+            'source': 'dataset',
+            'dataset_id': dataset_id,
+            'patient_id': patient_id
+        }
+        
+        session_file = os.path.join(session_path, 'session.json')
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f)
+        
+        # Build 3D volume
+        volume = np.stack([apply_modality_lut(s.pixel_array, s) for s in slices])
+        volume_file = os.path.join(session_path, 'volume.npy')
+        np.save(volume_file, volume)
+        
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'metadata': metadata
+        })
+    
+    except Exception as e:
+        return jsonify({'error': f'Error loading patient scan: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
