@@ -14,6 +14,7 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DATASETS_FOLDER'] = 'datasets'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
+app.config['USE_MEMORY_MAPPING'] = True
 
 # Ensure folders exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -216,7 +217,10 @@ def get_slice(session_id, slice_idx):
         
         # Load volume
         volume_file = os.path.join(upload_path, 'volume.npy')
-        volume = np.load(volume_file)
+        if app.config['USE_MEMORY_MAPPING']:
+            volume = np.load(volume_file, mmap_mode='r')
+        else:
+            volume = np.load(volume_file)
         
         if slice_idx < 0 or slice_idx >= volume.shape[0]:
             return jsonify({'error': 'Slice index out of range'}), 400
@@ -255,7 +259,10 @@ def get_multiplanar_views(session_id):
         
         # Load volume
         volume_file = os.path.join(upload_path, 'volume.npy')
-        volume = np.load(volume_file)
+        if app.config['USE_MEMORY_MAPPING']:
+            volume = np.load(volume_file, mmap_mode='r')
+        else:
+            volume = np.load(volume_file)
         
         # Get window settings
         window_center = session_data['metadata'].get('window_center')
