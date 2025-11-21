@@ -633,7 +633,7 @@
 
         function setupSliceViewer() {
             sliceSlider.max = totalSlices - 1;
-            sliceSlider.value = Math.floor(totalSlices / 2);
+            sliceSlider.value = 0;
             currentSlice = parseInt(sliceSlider.value);
             loadSlice(currentSlice);
         }

@@ -269,7 +269,7 @@ def get_multiplanar_views(session_id):
         window_width = session_data['metadata'].get('window_width')
         
         # Get middle slices for each view
-        axial_slice = volume[volume.shape[0]//2, :, :]
+        axial_slice = volume[0, :, :]
         coronal_slice = volume[:, volume.shape[1]//2, :]
         sagittal_slice = volume[:, :, volume.shape[2]//2]
         
